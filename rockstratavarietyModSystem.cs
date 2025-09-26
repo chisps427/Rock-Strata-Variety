@@ -52,6 +52,35 @@ namespace rockstratavariety
         public static ICoreAPI api;
         public Harmony harmony;
 
+        // keep track of which ID's are which rock group
+        internal static System.Collections.Generic.List<int>[] rockIdsByGroup = null;
+
+        public override double ExecuteOrder()
+        {
+            return 0.5; // load after block and item loader, so that all rock block types have been registered by the time the rock type directory is built
+        }
+
+        private static void buildRockTypeDirectory(RockStrataConfig strata)
+        {
+            //rock strata by group (sed = 0, met = 1, ig = 2, volc = 3)
+            rockIdsByGroup = new System.Collections.Generic.List<int>[4];
+            rockIdsByGroup[0] = new System.Collections.Generic.List<int>();
+            rockIdsByGroup[1] = new System.Collections.Generic.List<int>();
+            rockIdsByGroup[2] = new System.Collections.Generic.List<int>();
+            rockIdsByGroup[3] = new System.Collections.Generic.List<int>();
+
+            RockStratum rockStratum = null;
+
+            for (int strataId = 0; strataId < strata.Variants.Length; strataId++)
+            {
+                rockStratum = strata.Variants[strataId];
+                int rockGroup = (int)rockStratum.RockGroup;
+                rockIdsByGroup[rockGroup].Add(strataId);
+            }
+
+            api.Logger.Event("[RockStrataVariety] Built rock directory: {0} variants", strata.Variants.Length);
+        }
+
         // Called on server and client
         // Useful for registering block/entity classes on both sides
         public override void Start(ICoreAPI api)
@@ -95,6 +124,12 @@ namespace rockstratavariety
             )
         { // For methods, use __instance to obtain the caller object
 
+            if (rockIdsByGroup == null)
+            {
+                // build the Rock directory on the first run
+                buildRockTypeDirectory(___strata);
+            }
+
             // this stuff is unchanged from vanilla implementation
             int num = (int)___heightMap[lz * 32 + lx];
             int ylower = 1;
@@ -136,7 +171,14 @@ namespace rockstratavariety
             {
                 IntDataMap2D wrockMap = ___mapChunk.MapRegion.RockStrata[strataId];
                 float wstep = (float)wrockMap.InnerSize / (float)___regionChunkSize;
-                float noiseThickness = wrockMap.GetIntLerpedCorrectly((float)___rdx * wstep + wstep * ((float)lx + distx) / 32f, (float)___rdz * wstep + wstep * ((float)lz + distz) / 32f);
+                var nx = (float)___rdx * wstep + wstep * ((float)lx + distx) / 32f;
+                var nz = (float)___rdx * wstep + wstep * ((float)lz + distx) / 32f;
+
+                // 1.20 value clamping for chunk borders (idk if this is necessary but adding it for consistency)
+                //nx = Math.Max(nx, -1.499f);
+                //nz = Math.Max(nz, -1.499f);
+
+                float noiseThickness = wrockMap.GetIntLerpedCorrectly(nx, nz);
                 strataWeightedThickness[strataId] = noiseThickness; // this strataId's genned thickness, per noise map
 
                 rockStratum = ___strata.Variants[strataId];
@@ -164,13 +206,6 @@ namespace rockstratavariety
             // 3. rock type thickness / rockGroupNoiseThicness = rockTypePercentageOfGroup
             // 4. weightedThickness = rockTypePercentageOfGroup * rockGroupAdjMaxThickness[group]
 
-            // keep track of which ID's are which rock group
-            System.Collections.Generic.List<int>[] rockIdsByGroup = new System.Collections.Generic.List<int>[4];
-            rockIdsByGroup[0] = new System.Collections.Generic.List<int>();
-            rockIdsByGroup[1] = new System.Collections.Generic.List<int>();
-            rockIdsByGroup[2] = new System.Collections.Generic.List<int>();
-            rockIdsByGroup[3] = new System.Collections.Generic.List<int>();
-
             for (int strataId = 0; strataId < ___strata.Variants.Length; strataId++)
             {
                 rockStratum = ___strata.Variants[strataId];
@@ -185,30 +220,7 @@ namespace rockstratavariety
                     strataWeightedThickness[strataId] = 0;
                 }
                 else strataWeightedThickness[strataId] = weightedThickness;
-
-                // store Id of this rock type in rockIdsByGroup[rockGroup]
-                rockIdsByGroup[rockGroup].Add(strataId);
             }
-
-            /*
-            // DEBUG
-            for (int i = 0; i < 4; i++)
-            {
-                for (int j = 0; j < rockIdsByGroup[i].Count; j++)
-                {
-                    api.Logger.Event("grp {0}: var {1}", i, rockIdsByGroup[i][j]);
-                }
-            }
-            */
-
-            // DEBUG
-            /*
-            int[] rockGenTally = new int[___strata.Variants.Length];
-            for (int i=0; i<___strata.Variants.Length; i++)
-            {
-                rockGenTally[i] = 0;
-            }
-            */
 
             // generate rock groups in order. First do volcanic, then sedimentary, then metamorphic, and then let igneous fill in the remaining gaps.
             // use each strata's strataWeightedThickness to generate. Should already be scaled to rockGroupMaxThickness, so no need to check against that at every step,
@@ -245,9 +257,6 @@ namespace rockstratavariety
 
                     rockStrataId = rockIdsByGroup[grp][groupIndex];
 
-                    // DEBUG to tally what generates
-                    //rockGenTally[rockStrataId] = 0;
-
                     stratum = ___strata.Variants[rockStrataId];
                     strataThickness = Math.Min(___rockGroupMaxThickness[grp] * thicknessDistort - (float)___rockGroupCurrentThickness[grp], strataWeightedThickness[rockStrataId]);
 
@@ -270,9 +279,6 @@ namespace rockstratavariety
                             finishedColumn = true;
                             break;
                         }
-
-                        // DEBUG
-                        //rockGenTally[rockStrataId]++;
 
                         ___rockGroupCurrentThickness[grp]++;
 
@@ -308,50 +314,6 @@ namespace rockstratavariety
 
                 if (finishedColumn) break;
             }
-
-
-            /*
-            // DEBUG messages if last col in chunk
-            if (lx >= 31 && lz >= 31)
-            {
-                // finished generating this chunk column
-                // this makes some lag! don't uncomment this unless you're fine with that!
-
-                api.Logger.Event("GeoProvince Weights:");
-                for (int i = 0; i < indices.Length; i++)
-                {
-                    api.Logger.Event("{0}: {1}", i, indices[i]);
-                }
-
-                api.Logger.Event("sed max: {0}", ___rockGroupMaxThickness[0]);
-                api.Logger.Event("met max: {0}", ___rockGroupMaxThickness[1]);
-                api.Logger.Event("ign max: {0}", ___rockGroupMaxThickness[2]);
-                api.Logger.Event("vol max: {0}", ___rockGroupMaxThickness[3]);
-
-                api.Logger.Event("sed adj max: {0}", rockGroupAdjMaxThickness[0]);
-                api.Logger.Event("met adj max: {0}", rockGroupAdjMaxThickness[1]);
-                api.Logger.Event("ign adj max: {0}", rockGroupAdjMaxThickness[2]);
-                api.Logger.Event("vol adj max: {0}", rockGroupAdjMaxThickness[3]);
-
-                RockStratum debugrockStratum = null;
-                for (int strataId = 0; strataId < ___strata.Variants.Length; strataId++)
-                {
-                    IntDataMap2D debugRockMap = ___mapChunk.MapRegion.RockStrata[strataId];
-                    float debugstep = (float)debugRockMap.InnerSize / (float)___regionChunkSize;
-                    float debugnoiseThickness = debugRockMap.GetIntLerpedCorrectly((float)___rdx * debugstep + debugstep * ((float)lx + distx) / 32f, (float)___rdz * debugstep + debugstep * ((float)lz + distz) / 32f); 
-            
-                    debugrockStratum = ___strata.Variants[strataId];
-                    int debugrockGroup = (int)debugrockStratum.RockGroup;
-
-                    string rockStratumName = ___strata.Variants[strataId].BlockCode.ToString();
-
-                    if (debugnoiseThickness > 0)
-                    {
-                        api.Logger.Event("{0}: {1} predicted thickness, {2} noise, {3} actually genned", rockStratumName, strataWeightedThickness[strataId], debugnoiseThickness, rockGenTally[strataId]);
-                    }
-                }
-            }
-            */
 
             // cancel original function
             return false;
